@@ -869,6 +869,7 @@
       currentRoomCode = code;
       myPlayerColor = 'w';
       boardFlipped = false;
+      processedIds.clear();
 
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
@@ -878,7 +879,7 @@
       updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
       showToast(`Room ${code} created!`);
 
-      startNtfyListener(code);
+      startPollingFallback(code);
     }
 
     async function joinOnlineRoom() {
@@ -893,6 +894,7 @@
       currentRoomCode = code;
       myPlayerColor = 'b';
       boardFlipped = true;
+      processedIds.clear();
 
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
@@ -903,15 +905,24 @@
       showToast(`Joined room ${code}!`);
 
       await sendNtfyMessage({ type: 'join', sender: 'b' });
-      startNtfyListener(code);
+      startPollingFallback(code);
     }
 
     async function sendNtfyMessage(payload) {
       if (!currentRoomCode) return;
+      const packetId = 'pkg_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+      processedIds.add(packetId);
+
+      const packet = {
+        id: packetId,
+        sender: myPlayerColor,
+        ...payload
+      };
+
       try {
         await fetch(`https://ntfy.sh/${currentRoomCode}`, {
           method: 'POST',
-          body: JSON.stringify(payload)
+          body: JSON.stringify(packet)
         });
       } catch (err) {
         console.error('ntfy send error:', err);
@@ -929,43 +940,15 @@
       }
     }
 
-    function startNtfyListener(code) {
-      closeNtfyConnection();
-
-      // Connect to ntfy.sh EventSource for real-time streaming
-      try {
-        ntfyEventSource = new EventSource(`https://ntfy.sh/${code}/json`);
-        
-        ntfyEventSource.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (!data || !data.message) return;
-            const parsed = JSON.parse(data.message);
-
-            handleRemoteMessage(parsed);
-          } catch (e) {
-            // Not JSON or parse error
-          }
-        };
-
-        ntfyEventSource.onerror = () => {
-          // If SSE drops, fallback to polling
-          if (!pollingFallbackInterval) {
-            startPollingFallback(code);
-          }
-        };
-      } catch (err) {
-        startPollingFallback(code);
-      }
-    }
+    const processedIds = new Set();
 
     function startPollingFallback(code) {
-      if (pollingFallbackInterval) clearInterval(pollingFallbackInterval);
+      closeNtfyConnection();
 
       pollingFallbackInterval = setInterval(async () => {
         if (!currentRoomCode || gameMode !== 'online') return;
         try {
-          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=all`, {
+          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=2m&_=${Date.now()}`, {
             cache: 'no-store'
           });
           if (!res.ok) return;
@@ -974,18 +957,21 @@
           
           lines.forEach(line => {
             if (!line) return;
-            const item = JSON.parse(line);
-            if (item && item.message) {
-              try {
-                const parsed = JSON.parse(item.message);
-                handleRemoteMessage(parsed);
-              } catch(e) {}
-            }
+            try {
+              const item = JSON.parse(line);
+              if (item && item.message) {
+                const packet = JSON.parse(item.message);
+                if (!packet.id || processedIds.has(packet.id)) return;
+                processedIds.add(packet.id);
+
+                handleRemoteMessage(packet);
+              }
+            } catch(e) {}
           });
         } catch (err) {
           // Network blip
         }
-      }, 1500);
+      }, 800);
     }
 
     function handleRemoteMessage(data) {
@@ -994,13 +980,11 @@
       if (data.type === 'join' && myPlayerColor === 'w') {
         showToast('Opponent joined room!');
         updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-        // Broadcast current state to ensure sync
         sendNtfyMessage({
           type: 'move',
           fen: game.fen(),
           history: game.history(),
           lastMove: lastMove,
-          sender: myPlayerColor,
           status: 'playing'
         });
       } else if (data.type === 'move' && data.fen) {
@@ -1016,14 +1000,16 @@
       } else if (data.type === 'draw_offer') {
         showOverlay('Draw Offer', 'Opponent has offered a draw.');
       } else if (data.type === 'rematch' && data.fen) {
-        game.load(data.fen);
-        lastMove = null;
-        selectedSquare = null;
-        legalMovesForSelected = [];
-        hideOverlay();
-        renderBoard();
-        updateGameInfo();
-        showToast('Rematch started by opponent');
+        if (data.fen !== game.fen()) {
+          game.load(data.fen);
+          lastMove = null;
+          selectedSquare = null;
+          legalMovesForSelected = [];
+          hideOverlay();
+          renderBoard();
+          updateGameInfo();
+          showToast('Rematch started by opponent');
+        }
       }
     }
 
