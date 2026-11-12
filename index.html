@@ -338,11 +338,10 @@
     let draggedSquare = null;
     let draggedPiece = null;
 
-    // ntfy.sh Multiplayer State
+    // ntfy.sh SSE Multiplayer State
     let currentRoomCode = null;
     let myPlayerColor = 'w';
     let ntfyEventSource = null;
-    let pollingFallbackInterval = null;
 
     window.addEventListener('load', () => {
       lucide.createIcons();
@@ -863,13 +862,12 @@
       }
     }
 
-    // NTFY.SH MULTIPLAYER PROTOCOL
+    // NTFY.SH SSE MULTIPLAYER PROTOCOL
     async function createOnlineRoom() {
       const code = Math.random().toString(36).substring(2, 7).toUpperCase();
       currentRoomCode = code;
       myPlayerColor = 'w';
       boardFlipped = false;
-      processedIds.clear();
 
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
@@ -879,7 +877,7 @@
       updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
       showToast(`Room ${code} created!`);
 
-      startPollingFallback(code);
+      startSSEConnection(code);
     }
 
     async function joinOnlineRoom() {
@@ -894,7 +892,6 @@
       currentRoomCode = code;
       myPlayerColor = 'b';
       boardFlipped = true;
-      processedIds.clear();
 
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
@@ -904,17 +901,13 @@
       updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
       showToast(`Joined room ${code}!`);
 
+      startSSEConnection(code);
       await sendNtfyMessage({ type: 'join', sender: 'b' });
-      startPollingFallback(code);
     }
 
     async function sendNtfyMessage(payload) {
       if (!currentRoomCode) return;
-      const packetId = 'pkg_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
-      processedIds.add(packetId);
-
       const packet = {
-        id: packetId,
         sender: myPlayerColor,
         ...payload
       };
@@ -934,74 +927,63 @@
         ntfyEventSource.close();
         ntfyEventSource = null;
       }
-      if (pollingFallbackInterval) {
-        clearInterval(pollingFallbackInterval);
-        pollingFallbackInterval = null;
-      }
     }
 
-    const processedIds = new Set();
-
-    function startPollingFallback(code) {
+    function startSSEConnection(code) {
       closeNtfyConnection();
 
-      pollingFallbackInterval = setInterval(async () => {
-        if (!currentRoomCode || gameMode !== 'online') return;
-        try {
-          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=5m`, {
-            cache: 'no-store'
-          });
-          if (!res.ok) return;
-          const text = await res.text();
-          const lines = text.trim().split('\n');
-          
-          lines.forEach(line => {
-            if (!line) return;
-            try {
-              const item = JSON.parse(line);
-              if (item && item.message) {
-                const packet = JSON.parse(item.message);
-                if (!packet.id || processedIds.has(packet.id)) return;
-                processedIds.add(packet.id);
+      ntfyEventSource = new EventSource(`https://ntfy.sh/${code}/sse?since=all`);
 
-                handleRemoteMessage(packet);
-              }
-            } catch(e) {}
-          });
-        } catch (err) {
-          // Network blip / safe catch
+      ntfyEventSource.onmessage = (event) => {
+        try {
+          const packet = JSON.parse(event.data);
+          if (packet.event !== 'message' || !packet.message) return;
+
+          const payload = JSON.parse(packet.message);
+          if (payload.sender === myPlayerColor) return;
+
+          handleRemoteMessage(payload);
+        } catch (e) {
+          console.error('SSE parse error:', e);
         }
-      }, 1200);
+      };
+
+      ntfyEventSource.onerror = (err) => {
+        console.debug('SSE connection restart/reconnect check');
+      };
     }
 
-    function handleRemoteMessage(data) {
-      if (!data || data.sender === myPlayerColor) return;
+    function handleRemoteMessage(payload) {
+      if (!payload) return;
 
-      if (data.type === 'join' && myPlayerColor === 'w') {
+      if (payload.type === 'join' && myPlayerColor === 'w') {
         showToast('Opponent joined room!');
         updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+        // Immediately sync current state to joiner
         sendNtfyMessage({
-          type: 'move',
+          type: 'sync',
           fen: game.fen(),
           history: game.history(),
-          lastMove: lastMove,
-          status: 'playing'
+          sender: myPlayerColor
         });
-      } else if (data.type === 'move' && data.fen) {
-        if (data.fen !== game.fen()) {
-          game.load(data.fen);
-          lastMove = data.lastMove || null;
+      } else if ((payload.type === 'move' || payload.type === 'sync') && payload.fen) {
+        if (payload.fen !== game.fen()) {
+          game.load(payload.fen);
           updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+          if (myPlayerColor === 'b') {
+            boardFlipped = true;
+          }
           renderBoard();
           updateGameInfo();
+          showToast('Opponent move received');
         }
-      } else if (data.type === 'resign' && data.winner) {
-        showOverlay('Game Over', `${data.winner} wins by resignation!`);
-      } else if (data.type === 'draw_offer') {
+      } else if (payload.type === 'resign' && payload.winner) {
+        showOverlay('Game Over', `${payload.winner} wins by resignation!`);
+      } else if (payload.type === 'draw_offer') {
         showOverlay('Draw Offer', 'Opponent has offered a draw.');
-      } else if (data.type === 'rematch' && data.fen) {
-        if (data.fen !== game.fen()) {
-          game.load(data.fen);
+      } else if (payload.type === 'rematch' && payload.fen) {
+        if (payload.fen !== game.fen()) {
+          game.load(payload.fen);
           lastMove = null;
           selectedSquare = null;
           legalMovesForSelected = [];
