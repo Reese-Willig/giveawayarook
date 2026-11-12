@@ -14,8 +14,6 @@
   
   <!-- Chess.js library for standard rules -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
-  <!-- MQTT.js library via CDN -->
-  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <!-- Lucide Icons -->
   <script src="https://unpkg.com/lucide@latest"></script>
 
@@ -121,9 +119,9 @@
       <div>
         <h1 class="font-mono font-bold text-sm md:text-base text-slate-100 tracking-tight flex items-center gap-2">
           GRID_STATE_SIMULATOR
-          <span class="text-[10px] font-normal px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50">v2.1</span>
+          <span class="text-[10px] font-normal px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50">v2.4</span>
         </h1>
-        <p class="text-[10px] text-slate-400 font-mono hidden sm:block">Standard Chess Protocol • Distributed State Sync</p>
+        <p class="text-[10px] text-slate-400 font-mono hidden sm:block">Standard Chess Protocol • ntfy.sh Real-Time Pub/Sub</p>
       </div>
     </div>
 
@@ -210,7 +208,7 @@
       <div id="onlineRoomCard" class="hidden bg-slate-900 border border-slate-800 rounded-xl p-3 flex-col gap-2 font-mono">
         <div class="flex items-center justify-between">
           <span class="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
-            <i data-lucide="wifi" class="w-3.5 h-3.5"></i> MULTIPLAYER_ROOM
+            <i data-lucide="globe" class="w-3.5 h-3.5"></i> MULTIPLAYER_ROOM
           </span>
           <span id="onlineRoleTag" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">HOST (WHITE)</span>
         </div>
@@ -221,7 +219,7 @@
             <i data-lucide="plus" class="w-3.5 h-3.5"></i> CREATE
           </button>
           <div class="flex-1 flex gap-1">
-            <input id="roomCodeInput" type="text" placeholder="CODE" maxlength="5" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 text-center text-xs text-slate-100 uppercase font-mono tracking-widest focus:border-cyan-500 outline-none">
+            <input id="roomCodeInput" type="text" placeholder="ROOM CODE" maxlength="5" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 text-center text-xs text-slate-100 font-mono uppercase tracking-widest focus:border-cyan-500 outline-none">
             <button onclick="joinOnlineRoom()" class="px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs rounded-lg transition-all">
               JOIN
             </button>
@@ -233,10 +231,10 @@
           <div class="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg p-2">
             <div>
               <div class="text-[10px] text-slate-500">ROOM CODE</div>
-              <div id="currentRoomCode" class="text-base font-bold text-cyan-400 tracking-wider">GRID9</div>
+              <div id="currentRoomCode" class="text-sm font-bold text-cyan-400 tracking-wider">---</div>
             </div>
-            <button onclick="copyRoomCode()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-xs flex items-center gap-1 transition-all">
-              <i data-lucide="copy" class="w-3 h-3"></i> <span id="copyBtnText">COPY</span>
+            <button onclick="copyRoomLink()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-xs flex items-center gap-1 transition-all">
+              <i data-lucide="copy" class="w-3 h-3"></i> <span id="copyBtnText">COPY LINK</span>
             </button>
           </div>
         </div>
@@ -339,22 +337,27 @@
     let isDragging = false;
     let draggedSquare = null;
     let draggedPiece = null;
-    let dragStartX = 0;
-    let dragStartY = 0;
 
-    // MQTT State
-    let mqttClient = null;
+    // ntfy.sh Multiplayer State
     let currentRoomCode = null;
     let myPlayerColor = 'w';
-    let isConnectedToBroker = false;
-    let clientID = 'grid_sim_' + Math.random().toString(16).substr(2, 8);
+    let ntfyEventSource = null;
+    let pollingFallbackInterval = null;
 
     window.addEventListener('load', () => {
       lucide.createIcons();
       initBoardDOM();
       renderBoard();
       updateGameInfo();
-      setupMQTTConnection();
+
+      // Check URL for ?room=CODE
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room');
+      if (roomParam) {
+        setGameMode('online');
+        document.getElementById('roomCodeInput').value = roomParam;
+        joinOnlineRoom();
+      }
 
       // Global window pointer move and up events for smooth dragging
       window.addEventListener('pointermove', onWindowPointerMove);
@@ -372,7 +375,6 @@
           sq.dataset.row = r;
           sq.dataset.col = c;
           
-          // Click & Touch pointer down handlers
           sq.addEventListener('click', () => handleSquareClick(r, c));
           sq.addEventListener('pointerdown', (e) => handleSquarePointerDown(e, r, c));
 
@@ -475,7 +477,7 @@
 
     // DRAG AND DROP HANDLERS
     function handleSquarePointerDown(e, r, c) {
-      if (e.button !== undefined && e.button !== 0) return; // Only left click or touch
+      if (e.button !== undefined && e.button !== 0) return;
 
       const sqName = getSquareFromCoords(r, c);
       const piece = game.get(sqName);
@@ -494,7 +496,6 @@
       selectedSquare = sqName;
       legalMovesForSelected = game.moves({ square: sqName, verbose: true });
 
-      // Create ghost element
       const ghost = document.getElementById('dragGhost');
       ghost.innerHTML = `<span class="piece-symbol text-5xl font-normal leading-none ${piece.color === 'w' ? 'piece-white' : 'piece-black'}">${UNICODE_PIECES[piece.type]}</span>`;
       ghost.style.left = e.clientX + 'px';
@@ -519,7 +520,6 @@
       const ghost = document.getElementById('dragGhost');
       ghost.style.display = 'none';
 
-      // Find element under pointer
       const targetEl = document.elementFromPoint(e.clientX, e.clientY);
       const sqEl = targetEl ? targetEl.closest('.chess-square') : null;
 
@@ -537,7 +537,6 @@
             executeMove({ from: draggedSquare, to: targetSqName });
           }
         } else {
-          // Illegal drop - reset selection
           selectedSquare = null;
           legalMovesForSelected = [];
           renderBoard();
@@ -554,7 +553,7 @@
     }
 
     function handleSquareClick(r, c) {
-      if (isDragging) return; // Ignore click if drag just finished
+      if (isDragging) return;
       const sqName = getSquareFromCoords(r, c);
 
       if (gameMode === 'online') {
@@ -612,7 +611,14 @@
         updateGameInfo();
 
         if (gameMode === 'online') {
-          broadcastGameState();
+          sendNtfyMessage({
+            type: 'move',
+            fen: game.fen(),
+            history: game.history(),
+            lastMove: lastMove,
+            sender: myPlayerColor,
+            status: 'playing'
+          });
         }
       }
     }
@@ -792,14 +798,14 @@
       showOverlay('Resignation', `${resigningColor} has resigned. ${winner} wins!`);
 
       if (gameMode === 'online') {
-        broadcastCustomAction({ type: 'RESIGN', player: myPlayerColor });
+        sendNtfyMessage({ type: 'resign', sender: myPlayerColor, winner: winner });
       }
     }
 
     function offerDraw() {
       if (game.game_over()) return;
       if (gameMode === 'online') {
-        broadcastCustomAction({ type: 'DRAW_OFFER', player: myPlayerColor });
+        sendNtfyMessage({ type: 'draw_offer', sender: myPlayerColor });
         showToast('Draw offer sent to opponent');
       } else {
         showOverlay('Draw Agreed', 'Players have agreed to a draw.');
@@ -809,8 +815,13 @@
     function requestRematchOrReset() {
       hideOverlay();
       if (gameMode === 'online') {
-        broadcastCustomAction({ type: 'REMATCH_REQUEST', player: myPlayerColor });
-        showToast('Rematch request broadcast');
+        game.reset();
+        lastMove = null;
+        selectedSquare = null;
+        legalMovesForSelected = [];
+        renderBoard();
+        updateGameInfo();
+        sendNtfyMessage({ type: 'rematch', sender: myPlayerColor, fen: game.fen() });
       } else {
         game.reset();
         lastMove = null;
@@ -819,73 +830,6 @@
         renderBoard();
         updateGameInfo();
         showToast('Board reset to starting state');
-      }
-    }
-
-    function setupMQTTConnection() {
-      updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
-
-      const options = {
-        clientId: clientID,
-        clean: true,
-        connectTimeout: 5000,
-        keepalive: 30
-      };
-
-      try {
-        mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', options);
-
-        mqttClient.on('connect', () => {
-          onMQTTConnectSuccess();
-        });
-
-        mqttClient.on('error', (err) => {
-          console.error('MQTT Connect Error:', err);
-          onMQTTConnectFailure(err);
-        });
-
-        mqttClient.on('close', () => {
-          if (isConnectedToBroker) {
-            onMQTTConnectionLost();
-          }
-        });
-
-        mqttClient.on('message', (topic, payload) => {
-          onMQTTMessageArrived(payload.toString());
-        });
-
-      } catch (err) {
-        console.error('MQTT Setup Error:', err);
-        updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
-      }
-    }
-
-    function onMQTTConnectSuccess() {
-      isConnectedToBroker = true;
-      if (gameMode === 'online') {
-        updateConnectionStatus(currentRoomCode ? 'ONLINE: WAITING' : 'ONLINE: READY', 'bg-amber-400');
-      } else {
-        updateConnectionStatus('LOCAL MODE', 'bg-emerald-400');
-      }
-    }
-
-    function onMQTTConnectFailure(err) {
-      isConnectedToBroker = false;
-      updateConnectionStatus('OFFLINE', 'bg-slate-500');
-      console.warn('MQTT Connection Failure:', err);
-    }
-
-    function onMQTTConnectionLost() {
-      isConnectedToBroker = false;
-      updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
-      showToast('Network disconnected. Reconnecting...');
-    }
-
-    function updateConnectionStatus(text, dotClass) {
-      document.getElementById('connectionBadgeText').innerText = text;
-      const badgeDot = document.querySelector('#connectionBadge span:first-child');
-      if (badgeDot) {
-        badgeDot.className = `w-2 h-2 rounded-full animate-pulse ${dotClass}`;
       }
     }
 
@@ -900,54 +844,49 @@
         onlineBtn.className = 'px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all';
         onlineCard.classList.add('hidden');
         boardFlipped = false;
+        closeNtfyConnection();
         updateConnectionStatus('LOCAL MODE', 'bg-emerald-400');
       } else {
         onlineBtn.className = 'px-2.5 py-1 rounded-md bg-slate-800 text-cyan-400 font-medium transition-all shadow-sm';
         localBtn.className = 'px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all';
         onlineCard.classList.remove('hidden');
-        updateConnectionStatus(isConnectedToBroker ? 'ONLINE: READY' : 'CONNECTING...', 'bg-amber-400');
+        updateConnectionStatus(currentRoomCode ? 'ONLINE: CONNECTED' : 'ONLINE: READY', currentRoomCode ? 'bg-emerald-400' : 'bg-amber-400');
       }
       renderBoard();
     }
 
-    function createOnlineRoom() {
-      if (!isConnectedToBroker) {
-        showToast('Connecting to network broker...');
-        return;
+    function updateConnectionStatus(text, dotClass) {
+      document.getElementById('connectionBadgeText').innerText = text;
+      const badgeDot = document.querySelector('#connectionBadge span:first-child');
+      if (badgeDot) {
+        badgeDot.className = `w-2 h-2 rounded-full animate-pulse ${dotClass}`;
       }
+    }
 
-      const code = 'GRID' + Math.floor(100 + Math.random() * 900);
+    // NTFY.SH MULTIPLAYER PROTOCOL
+    async function createOnlineRoom() {
+      const code = Math.random().toString(36).substring(2, 7).toUpperCase();
       currentRoomCode = code;
       myPlayerColor = 'w';
       boardFlipped = false;
 
-      subscribeToRoomTopic(code);
-
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
-      document.getElementById('currentRoomCode').innerText = code;
+      document.getElementById('currentRoomCode').innerText = currentRoomCode;
       document.getElementById('onlineRoleTag').innerText = 'HOST (WHITE)';
-      
-      updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
-      showToast(`Room ${code} created. Share code with friend!`);
 
-      game.reset();
-      lastMove = null;
-      renderBoard();
-      updateGameInfo();
+      updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
+      showToast(`Room ${code} created!`);
+
+      startNtfyListener(code);
     }
 
-    function joinOnlineRoom() {
-      if (!isConnectedToBroker) {
-        showToast('Connecting to network broker...');
-        return;
-      }
-
+    async function joinOnlineRoom() {
       const input = document.getElementById('roomCodeInput');
       const code = input.value.trim().toUpperCase();
 
-      if (code.length < 4) {
-        showToast('Enter valid room code');
+      if (!code || code.length < 3) {
+        showToast('Enter valid 5-character room code');
         return;
       }
 
@@ -955,119 +894,154 @@
       myPlayerColor = 'b';
       boardFlipped = true;
 
-      subscribeToRoomTopic(code);
-
       document.getElementById('roomSetupControls').classList.add('hidden');
       document.getElementById('roomActiveDisplay').classList.remove('hidden');
-      document.getElementById('currentRoomCode').innerText = code;
+      document.getElementById('currentRoomCode').innerText = currentRoomCode;
       document.getElementById('onlineRoleTag').innerText = 'JOINER (BLACK)';
 
-      updateConnectionStatus('ONLINE: CONNECTED', 'bg-emerald-400');
+      updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
       showToast(`Joined room ${code}!`);
 
-      broadcastCustomAction({ type: 'JOIN_REQUEST' });
-
-      renderBoard();
-      updateGameInfo();
+      await sendNtfyMessage({ type: 'join', sender: 'b' });
+      startNtfyListener(code);
     }
 
-    function subscribeToRoomTopic(code) {
-      const topic = `gridstatesim/room/${code}`;
-      if (mqttClient) {
-        mqttClient.subscribe(topic);
-      }
-    }
-
-    function broadcastGameState() {
-      if (!mqttClient || !currentRoomCode) return;
-
-      const payload = {
-        sender: clientID,
-        type: 'GAME_STATE',
-        fen: game.fen(),
-        lastMove: lastMove,
-        turn: game.turn()
-      };
-
-      mqttClient.publish(`gridstatesim/room/${currentRoomCode}`, JSON.stringify(payload));
-    }
-
-    function broadcastCustomAction(actionObj) {
-      if (!mqttClient || !currentRoomCode) return;
-
-      const payload = {
-        sender: clientID,
-        ...actionObj
-      };
-
-      mqttClient.publish(`gridstatesim/room/${currentRoomCode}`, JSON.stringify(payload));
-    }
-
-    function onMQTTMessageArrived(payloadStr) {
+    async function sendNtfyMessage(payload) {
+      if (!currentRoomCode) return;
       try {
-        const data = JSON.parse(payloadStr);
-
-        if (data.sender === clientID) return;
-
-        if (data.type === 'GAME_STATE') {
-          game.load(data.fen);
-          lastMove = data.lastMove;
-          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-          renderBoard();
-          updateGameInfo();
-        }
-
-        if (data.type === 'JOIN_REQUEST' && myPlayerColor === 'w') {
-          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-          showToast('Opponent joined the room!');
-          broadcastGameState();
-        }
-
-        if (data.type === 'RESIGN') {
-          const winner = data.player === 'w' ? 'Black' : 'White';
-          showOverlay('Opponent Resigned', `Opponent has resigned. ${winner} wins!`);
-        }
-
-        if (data.type === 'DRAW_OFFER') {
-          showOverlay('Draw Offer', 'Opponent offered a draw.');
-          broadcastCustomAction({ type: 'DRAW_ACCEPT' });
-        }
-
-        if (data.type === 'DRAW_ACCEPT') {
-          showOverlay('Draw Agreed', 'Opponent accepted draw offer.');
-        }
-
-        if (data.type === 'REMATCH_REQUEST') {
-          showToast('Opponent reset the board for rematch');
-          game.reset();
-          lastMove = null;
-          selectedSquare = null;
-          legalMovesForSelected = [];
-          hideOverlay();
-          renderBoard();
-          updateGameInfo();
-        }
-
+        await fetch(`https://ntfy.sh/${currentRoomCode}`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
       } catch (err) {
-        console.error('Error handling MQTT message:', err);
+        console.error('ntfy send error:', err);
       }
     }
 
-    function copyRoomCode() {
+    function closeNtfyConnection() {
+      if (ntfyEventSource) {
+        ntfyEventSource.close();
+        ntfyEventSource = null;
+      }
+      if (pollingFallbackInterval) {
+        clearInterval(pollingFallbackInterval);
+        pollingFallbackInterval = null;
+      }
+    }
+
+    function startNtfyListener(code) {
+      closeNtfyConnection();
+
+      // Connect to ntfy.sh EventSource for real-time streaming
+      try {
+        ntfyEventSource = new EventSource(`https://ntfy.sh/${code}/json`);
+        
+        ntfyEventSource.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (!data || !data.message) return;
+            const parsed = JSON.parse(data.message);
+
+            handleRemoteMessage(parsed);
+          } catch (e) {
+            // Not JSON or parse error
+          }
+        };
+
+        ntfyEventSource.onerror = () => {
+          // If SSE drops, fallback to polling
+          if (!pollingFallbackInterval) {
+            startPollingFallback(code);
+          }
+        };
+      } catch (err) {
+        startPollingFallback(code);
+      }
+    }
+
+    function startPollingFallback(code) {
+      if (pollingFallbackInterval) clearInterval(pollingFallbackInterval);
+
+      pollingFallbackInterval = setInterval(async () => {
+        if (!currentRoomCode || gameMode !== 'online') return;
+        try {
+          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=all`, {
+            cache: 'no-store'
+          });
+          if (!res.ok) return;
+          const text = await res.text();
+          const lines = text.trim().split('\n');
+          
+          lines.forEach(line => {
+            if (!line) return;
+            const item = JSON.parse(line);
+            if (item && item.message) {
+              try {
+                const parsed = JSON.parse(item.message);
+                handleRemoteMessage(parsed);
+              } catch(e) {}
+            }
+          });
+        } catch (err) {
+          // Network blip
+        }
+      }, 1500);
+    }
+
+    function handleRemoteMessage(data) {
+      if (!data || data.sender === myPlayerColor) return;
+
+      if (data.type === 'join' && myPlayerColor === 'w') {
+        showToast('Opponent joined room!');
+        updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+        // Broadcast current state to ensure sync
+        sendNtfyMessage({
+          type: 'move',
+          fen: game.fen(),
+          history: game.history(),
+          lastMove: lastMove,
+          sender: myPlayerColor,
+          status: 'playing'
+        });
+      } else if (data.type === 'move' && data.fen) {
+        if (data.fen !== game.fen()) {
+          game.load(data.fen);
+          lastMove = data.lastMove || null;
+          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+          renderBoard();
+          updateGameInfo();
+        }
+      } else if (data.type === 'resign' && data.winner) {
+        showOverlay('Game Over', `${data.winner} wins by resignation!`);
+      } else if (data.type === 'draw_offer') {
+        showOverlay('Draw Offer', 'Opponent has offered a draw.');
+      } else if (data.type === 'rematch' && data.fen) {
+        game.load(data.fen);
+        lastMove = null;
+        selectedSquare = null;
+        legalMovesForSelected = [];
+        hideOverlay();
+        renderBoard();
+        updateGameInfo();
+        showToast('Rematch started by opponent');
+      }
+    }
+
+    function copyRoomLink() {
       if (!currentRoomCode) return;
       
-      const textToCopy = currentRoomCode;
+      const shareUrl = window.location.origin + window.location.pathname + '?room=' + currentRoomCode;
       const dummy = document.createElement('textarea');
       document.body.appendChild(dummy);
-      dummy.value = textToCopy;
+      dummy.value = shareUrl;
       dummy.select();
       document.execCommand('copy');
       document.body.removeChild(dummy);
 
       const btnText = document.getElementById('copyBtnText');
-      btnText.innerText = 'COPIED!';
-      setTimeout(() => { btnText.innerText = 'COPY'; }, 2000);
-      showToast(`Room code ${currentRoomCode} copied!`);
+      btnText.innerText = 'COPIED LINK!';
+      setTimeout(() => { btnText.innerText = 'COPY LINK'; }, 2000);
+      showToast(`Multiplayer link copied to clipboard!`);
     }
 
     function copyFEN() {
