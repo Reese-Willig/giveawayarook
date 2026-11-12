@@ -948,7 +948,7 @@
       pollingFallbackInterval = setInterval(async () => {
         if (!currentRoomCode || gameMode !== 'online') return;
         try {
-          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=2m&_=${Date.now()}`, {
+          const res = await fetch(`https://ntfy.sh/${code}/json?poll=1&since=5m`, {
             cache: 'no-store'
           });
           if (!res.ok) return;
@@ -969,9 +969,9 @@
             } catch(e) {}
           });
         } catch (err) {
-          // Network blip
+          // Network blip / safe catch
         }
-      }, 800);
+      }, 1200);
     }
 
     function handleRemoteMessage(data) {
