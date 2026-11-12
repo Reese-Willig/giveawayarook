@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-900 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Grid State Simulator - Standard Chess Engine</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Fonts: JetBrains Mono & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Chess.js library for standard rules -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <!-- MQTT.js library via CDN -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            brand: {
+              cyan: '#06b6d4',
+              green: '#10b981',
+              emerald: '#34d399',
+              dark: '#0f172a',
+              panel: '#1e293b',
+              border: '#334155',
+              accent: '#38bdf8'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    body {
+      touch-action: manipulation;
+      overflow: hidden;
+      font-family: 'Inter', sans-serif;
+    }
+    
+    .chess-square {
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      transition: background-color 0.15s ease;
+    }
+    
+    .sq-light { background-color: #eeeed2; }
+    .sq-dark { background-color: #769656; }
+    
+    .sq-selected { background-color: #baca44 !important; }
+    .sq-last-move { background-color: rgba(255, 255, 0, 0.4) !important; }
+    .sq-check { background-color: rgba(239, 68, 68, 0.75) !important; }
+    
+    .piece-symbol {
+      line-height: 1;
+      user-select: none;
+      -webkit-user-select: none;
+      pointer-events: none;
+    }
+
+    .piece-white {
+      color: #ffffff;
+      text-shadow: 0 0 2px #000000, 0 2px 4px rgba(0, 0, 0, 0.85);
+    }
+
+    .piece-black {
+      color: #111827;
+      text-shadow: 0 0 1.5px #ffffff, 0 2px 3px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Floating drag ghost element */
+    #dragGhost {
+      position: fixed;
+      pointer-events: none;
+      z-index: 1000;
+      transform: translate(-50%, -50%);
+      display: none;
+      filter: drop-shadow(0 10px 15px rgba(0, 0, 0, 0.5));
+    }
+
+    ::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 2px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="h-full w-full bg-slate-950 text-slate-100 flex flex-col font-sans select-none">
+
+  <!-- FLOATING DRAG GHOST -->
+  <div id="dragGhost"></div>
+
+  <!-- TOP HEADER / TOOLBAR -->
+  <header class="h-14 border-b border-slate-800 bg-slate-900/90 px-3 md:px-6 flex items-center justify-between shrink-0">
+    <div class="flex items-center space-x-3">
+      <div class="p-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded-lg text-cyan-400">
+        <i data-lucide="cpu" class="w-5 h-5"></i>
+      </div>
+      <div>
+        <h1 class="font-mono font-bold text-sm md:text-base text-slate-100 tracking-tight flex items-center gap-2">
+          GRID_STATE_SIMULATOR
+          <span class="text-[10px] font-normal px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800/50">v2.1</span>
+        </h1>
+        <p class="text-[10px] text-slate-400 font-mono hidden sm:block">Standard Chess Protocol • Distributed State Sync</p>
+      </div>
+    </div>
+
+    <!-- MODE SWITCH TABS & STATUS BADGE -->
+    <div class="flex items-center space-x-2 md:space-x-4">
+      <div id="connectionBadge" class="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-mono bg-slate-800 border border-slate-700 text-slate-300">
+        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="connectionBadgeText">LOCAL MODE</span>
+      </div>
+
+      <div class="bg-slate-950 p-0.5 rounded-lg border border-slate-800 flex text-xs font-mono">
+        <button id="modeLocalBtn" onclick="setGameMode('local')" class="px-2.5 py-1 rounded-md bg-slate-800 text-cyan-400 font-medium transition-all shadow-sm">
+          LOCAL
+        </button>
+        <button id="modeOnlineBtn" onclick="setGameMode('online')" class="px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all">
+          ONLINE
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN APP CONTAINER -->
+  <main class="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden p-2 md:p-4 gap-3 md:gap-4 max-w-7xl w-full mx-auto">
+    
+    <!-- LEFT PANEL: Chessboard Area -->
+    <section class="flex-1 flex flex-col items-center justify-center min-h-0 relative">
+      
+      <!-- TOP CAPTURED / OPPONENT PANEL -->
+      <div class="w-full max-w-[520px] mb-1.5 flex items-center justify-between px-2 py-1 bg-slate-900/60 border border-slate-800/80 rounded-lg text-xs font-mono">
+        <div class="flex items-center gap-2">
+          <span id="topPlayerTag" class="font-bold text-slate-300">BLACK</span>
+          <div id="topCapturedPieces" class="flex items-center -space-x-1 h-5 overflow-hidden"></div>
+        </div>
+        <span id="topAdvantage" class="text-emerald-400 text-[11px]"></span>
+      </div>
+
+      <!-- MAIN CHESSBOARD GRID CONTAINER -->
+      <div id="boardContainer" class="relative w-full max-w-[520px] aspect-square bg-slate-900 rounded-xl p-1 md:p-2 border border-slate-800 shadow-2xl flex flex-col">
+        <div id="boardGrid" class="w-full h-full grid grid-cols-8 grid-rows-8 rounded-lg overflow-hidden border border-slate-700/60 relative">
+          <!-- Board Squares generated via JS -->
+        </div>
+
+        <!-- Overlay for Modal / Draw / Checkmate alerts -->
+        <div id="boardOverlay" class="hidden absolute inset-0 bg-slate-950/80 backdrop-blur-sm rounded-xl flex flex-col items-center justify-center p-6 text-center z-20">
+          <div id="overlayIcon" class="p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-full text-cyan-400 mb-3">
+            <i data-lucide="trophy" class="w-8 h-8"></i>
+          </div>
+          <h2 id="overlayTitle" class="text-xl font-mono font-bold text-slate-100 mb-1">Checkmate!</h2>
+          <p id="overlayMessage" class="text-xs text-slate-400 font-mono mb-4">White is victorious by checkmate protocol.</p>
+          <div class="flex gap-2">
+            <button onclick="requestRematchOrReset()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-mono font-bold text-xs rounded-lg transition-all flex items-center gap-2">
+              <i data-lucide="rotate-ccw" class="w-4 h-4"></i> PLAY AGAIN
+            </button>
+            <button onclick="hideOverlay()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs rounded-lg transition-all">
+              VIEW BOARD
+            </button>
+          </div>
+        </div>
+
+        <!-- PROMOTION MODAL -->
+        <div id="promotionModal" class="hidden absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-xl flex flex-col items-center justify-center p-4 z-30">
+          <h3 class="text-sm font-mono font-bold text-slate-200 mb-3 uppercase tracking-wider">Select Promotion Piece</h3>
+          <div id="promotionOptions" class="flex gap-3 bg-slate-900 p-3 rounded-xl border border-slate-700">
+            <!-- Choices populating via JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- BOTTOM CAPTURED / SELF PANEL -->
+      <div class="w-full max-w-[520px] mt-1.5 flex items-center justify-between px-2 py-1 bg-slate-900/60 border border-slate-800/80 rounded-lg text-xs font-mono">
+        <div class="flex items-center gap-2">
+          <span id="bottomPlayerTag" class="font-bold text-slate-300">WHITE</span>
+          <div id="bottomCapturedPieces" class="flex items-center -space-x-1 h-5 overflow-hidden"></div>
+        </div>
+        <span id="bottomAdvantage" class="text-emerald-400 text-[11px]"></span>
+      </div>
+
+    </section>
+
+    <!-- RIGHT PANEL: Sidebar Dashboard / Controls -->
+    <aside class="w-full lg:w-80 h-auto lg:h-full flex flex-col gap-3 min-h-0 shrink-0">
+      
+      <!-- ONLINE ROOM MANAGEMENT CARD -->
+      <div id="onlineRoomCard" class="hidden bg-slate-900 border border-slate-800 rounded-xl p-3 flex-col gap-2 font-mono">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-cyan-400 flex items-center gap-1.5">
+            <i data-lucide="wifi" class="w-3.5 h-3.5"></i> MULTIPLAYER_ROOM
+          </span>
+          <span id="onlineRoleTag" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-400">HOST (WHITE)</span>
+        </div>
+
+        <!-- Room Setup Controls -->
+        <div id="roomSetupControls" class="flex gap-2">
+          <button onclick="createOnlineRoom()" class="flex-1 py-1.5 bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 font-bold text-xs rounded-lg transition-all flex items-center justify-center gap-1">
+            <i data-lucide="plus" class="w-3.5 h-3.5"></i> CREATE
+          </button>
+          <div class="flex-1 flex gap-1">
+            <input id="roomCodeInput" type="text" placeholder="CODE" maxlength="5" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2 text-center text-xs text-slate-100 uppercase font-mono tracking-widest focus:border-cyan-500 outline-none">
+            <button onclick="joinOnlineRoom()" class="px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs rounded-lg transition-all">
+              JOIN
+            </button>
+          </div>
+        </div>
+
+        <!-- Room Info Active Display -->
+        <div id="roomActiveDisplay" class="hidden flex-col gap-2 pt-1">
+          <div class="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg p-2">
+            <div>
+              <div class="text-[10px] text-slate-500">ROOM CODE</div>
+              <div id="currentRoomCode" class="text-base font-bold text-cyan-400 tracking-wider">GRID9</div>
+            </div>
+            <button onclick="copyRoomCode()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded text-xs flex items-center gap-1 transition-all">
+              <i data-lucide="copy" class="w-3 h-3"></i> <span id="copyBtnText">COPY</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- GAME STATUS & FEN DISPLAY CARD -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-col gap-2">
+        <div class="flex items-center justify-between font-mono">
+          <span class="text-xs text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <i data-lucide="activity" class="w-3.5 h-3.5 text-cyan-400"></i> STATE_STATUS
+          </span>
+          <span id="turnIndicator" class="text-xs font-bold px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200">
+            WHITE TO MOVE
+          </span>
+        </div>
+
+        <div id="gameNoticeBanner" class="hidden p-2 rounded-lg bg-cyan-950/40 border border-cyan-800/50 text-cyan-300 text-xs font-mono flex items-center gap-2">
+          <i data-lucide="info" class="w-4 h-4 shrink-0"></i>
+          <span id="gameNoticeText">Check!</span>
+        </div>
+
+        <!-- FEN Snippet -->
+        <div class="bg-slate-950 border border-slate-800/80 rounded-lg p-2 font-mono text-[10px]">
+          <div class="text-slate-500 mb-0.5 flex justify-between items-center">
+            <span>CURRENT_FEN</span>
+            <button onclick="copyFEN()" class="text-slate-400 hover:text-cyan-400 transition-colors">
+              <i data-lucide="clipboard" class="w-3 h-3"></i>
+            </button>
+          </div>
+          <div id="fenText" class="text-slate-400 truncate select-all">rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1</div>
+        </div>
+      </div>
+
+      <!-- MOVE HISTORY LOG -->
+      <div class="flex-1 bg-slate-900 border border-slate-800 rounded-xl p-3 flex flex-col min-h-[140px] max-h-[220px] lg:max-h-none overflow-hidden">
+        <div class="flex items-center justify-between font-mono text-xs text-slate-400 mb-2 pb-1 border-b border-slate-800">
+          <span class="flex items-center gap-1.5 font-bold text-slate-300">
+            <i data-lucide="terminal" class="w-3.5 h-3.5 text-cyan-400"></i> MOVE_LOG
+          </span>
+          <span id="moveCountTag" class="text-[10px] text-slate-500">0 MOVES</span>
+        </div>
+        
+        <div id="moveLogContainer" class="flex-1 overflow-y-auto font-mono text-xs space-y-1 pr-1">
+          <div class="text-slate-600 text-[11px] italic text-center py-4">No moves recorded yet.</div>
+        </div>
+      </div>
+
+      <!-- ACTION BUTTONS TOOLBAR -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-2.5 grid grid-cols-4 gap-2 font-mono text-xs">
+        <button onclick="flipBoardToggle()" title="Flip Board View" class="py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg flex flex-col items-center justify-center gap-1 transition-all">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          <span class="text-[9px]">FLIP</span>
+        </button>
+        <button onclick="offerDraw()" title="Offer Draw" class="py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg flex flex-col items-center justify-center gap-1 transition-all">
+          <i data-lucide="handshake" class="w-4 h-4"></i>
+          <span class="text-[9px]">DRAW</span>
+        </button>
+        <button onclick="resignGame()" title="Resign Game" class="py-2 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50 rounded-lg flex flex-col items-center justify-center gap-1 transition-all">
+          <i data-lucide="flag" class="w-4 h-4"></i>
+          <span class="text-[9px]">RESIGN</span>
+        </button>
+        <button onclick="requestRematchOrReset()" title="Reset / Rematch" class="py-2 bg-cyan-950/50 hover:bg-cyan-900/70 text-cyan-300 border border-cyan-800/50 rounded-lg flex flex-col items-center justify-center gap-1 transition-all">
+          <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+          <span class="text-[9px]">RESET</span>
+        </button>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- NOTIFICATION TOAST POPUP -->
+  <div id="toastNotification" class="fixed bottom-4 right-4 z-50 transform translate-y-20 opacity-0 transition-all duration-300 bg-slate-800 border border-cyan-500/50 text-slate-100 font-mono text-xs px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2">
+    <i data-lucide="bell" class="w-4 h-4 text-cyan-400"></i>
+    <span id="toastText">Notification message</span>
+  </div>
+
+  <!-- CHESS PIECE SYMBOLS & LOGIC -->
+  <script>
+    const UNICODE_PIECES = {
+      'k': '♚',
+      'q': '♛',
+      'r': '♜',
+      'b': '♝',
+      'n': '♞',
+      'p': '♟'
+    };
+
+    const PIECE_VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+
+    // APP STATE
+    let game = new Chess();
+    let gameMode = 'local';
+    let boardFlipped = false;
+    let selectedSquare = null;
+    let legalMovesForSelected = [];
+    let lastMove = null;
+    let pendingPromotionMove = null;
+
+    // Drag-and-drop state
+    let isDragging = false;
+    let draggedSquare = null;
+    let draggedPiece = null;
+    let dragStartX = 0;
+    let dragStartY = 0;
+
+    // MQTT State
+    let mqttClient = null;
+    let currentRoomCode = null;
+    let myPlayerColor = 'w';
+    let isConnectedToBroker = false;
+    let clientID = 'grid_sim_' + Math.random().toString(16).substr(2, 8);
+
+    window.addEventListener('load', () => {
+      lucide.createIcons();
+      initBoardDOM();
+      renderBoard();
+      updateGameInfo();
+      setupMQTTConnection();
+
+      // Global window pointer move and up events for smooth dragging
+      window.addEventListener('pointermove', onWindowPointerMove);
+      window.addEventListener('pointerup', onWindowPointerUp);
+    });
+
+    function initBoardDOM() {
+      const grid = document.getElementById('boardGrid');
+      grid.innerHTML = '';
+
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const sq = document.createElement('div');
+          sq.className = 'chess-square flex items-center justify-center relative cursor-pointer';
+          sq.dataset.row = r;
+          sq.dataset.col = c;
+          
+          // Click & Touch pointer down handlers
+          sq.addEventListener('click', () => handleSquareClick(r, c));
+          sq.addEventListener('pointerdown', (e) => handleSquarePointerDown(e, r, c));
+
+          grid.appendChild(sq);
+        }
+      }
+    }
+
+    function getSquareFromCoords(r, c) {
+      const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
+
+      let actualFileIdx = boardFlipped ? 7 - c : c;
+      let actualRankIdx = boardFlipped ? 7 - r : r;
+
+      return files[actualFileIdx] + ranks[actualRankIdx];
+    }
+
+    function renderBoard() {
+      const grid = document.getElementById('boardGrid');
+      if (!grid) return;
+      const children = grid.children;
+
+      let inCheckSquare = null;
+      if (game.in_check()) {
+        const board = game.board();
+        for (let r = 0; r < 8; r++) {
+          for (let c = 0; c < 8; c++) {
+            const p = board[r][c];
+            if (p && p.type === 'k' && p.color === game.turn()) {
+              const files = ['a','b','c','d','e','f','g','h'];
+              inCheckSquare = files[c] + (8 - r);
+            }
+          }
+        }
+      }
+
+      for (let i = 0; i < 64; i++) {
+        const sq = children[i];
+        const r = parseInt(sq.dataset.row, 10);
+        const c = parseInt(sq.dataset.col, 10);
+        const sqName = getSquareFromCoords(r, c);
+
+        let isDark = (r + c) % 2 === 1;
+        sq.className = `chess-square flex items-center justify-center relative cursor-pointer ${isDark ? 'sq-dark' : 'sq-light'}`;
+        sq.innerHTML = '';
+
+        if ((!boardFlipped && c === 0) || (boardFlipped && c === 7)) {
+          const rankLabel = document.createElement('span');
+          rankLabel.className = `absolute top-0.5 left-1 text-[9px] font-mono font-bold pointer-events-none ${isDark ? 'text-[#eeeed2]/80' : 'text-[#769656]/90'}`;
+          rankLabel.innerText = sqName[1];
+          sq.appendChild(rankLabel);
+        }
+        if ((!boardFlipped && r === 7) || (boardFlipped && r === 0)) {
+          const fileLabel = document.createElement('span');
+          fileLabel.className = `absolute bottom-0.5 right-1 text-[9px] font-mono font-bold pointer-events-none ${isDark ? 'text-[#eeeed2]/80' : 'text-[#769656]/90'}`;
+          fileLabel.innerText = sqName[0];
+          sq.appendChild(fileLabel);
+        }
+
+        if (selectedSquare === sqName && !isDragging) {
+          sq.classList.add('sq-selected');
+        }
+        if (lastMove && (lastMove.from === sqName || lastMove.to === sqName)) {
+          sq.classList.add('sq-last-move');
+        }
+        if (inCheckSquare === sqName) {
+          sq.classList.add('sq-check');
+        }
+
+        const isLegal = legalMovesForSelected.some(m => m.to === sqName);
+        if (isLegal) {
+          const pieceOnSq = game.get(sqName);
+          const dot = document.createElement('div');
+          if (pieceOnSq) {
+            dot.className = 'absolute inset-1 rounded-full border-2 border-emerald-400 pointer-events-none bg-emerald-500/20';
+          } else {
+            dot.className = 'w-3 h-3 rounded-full bg-emerald-400/80 pointer-events-none shadow-lg shadow-emerald-500/50';
+          }
+          sq.appendChild(dot);
+        }
+
+        const piece = game.get(sqName);
+        if (piece && !(isDragging && draggedSquare === sqName)) {
+          const pieceSymbol = UNICODE_PIECES[piece.type];
+          if (pieceSymbol) {
+            const pieceWrap = document.createElement('div');
+            pieceWrap.className = 'w-full h-full flex items-center justify-center z-10 pointer-events-none';
+            const span = document.createElement('span');
+            span.className = `piece-symbol text-3xl sm:text-4xl md:text-5xl font-normal leading-none ${piece.color === 'w' ? 'piece-white' : 'piece-black'}`;
+            span.innerText = pieceSymbol;
+            pieceWrap.appendChild(span);
+            sq.appendChild(pieceWrap);
+          }
+        }
+      }
+
+      updateCapturedAndAdvantage();
+    }
+
+    // DRAG AND DROP HANDLERS
+    function handleSquarePointerDown(e, r, c) {
+      if (e.button !== undefined && e.button !== 0) return; // Only left click or touch
+
+      const sqName = getSquareFromCoords(r, c);
+      const piece = game.get(sqName);
+
+      if (!piece) return;
+
+      if (gameMode === 'online') {
+        if (!currentRoomCode || game.turn() !== myPlayerColor) return;
+      } else {
+        if (piece.color !== game.turn()) return;
+      }
+
+      isDragging = true;
+      draggedSquare = sqName;
+      draggedPiece = piece;
+      selectedSquare = sqName;
+      legalMovesForSelected = game.moves({ square: sqName, verbose: true });
+
+      // Create ghost element
+      const ghost = document.getElementById('dragGhost');
+      ghost.innerHTML = `<span class="piece-symbol text-5xl font-normal leading-none ${piece.color === 'w' ? 'piece-white' : 'piece-black'}">${UNICODE_PIECES[piece.type]}</span>`;
+      ghost.style.left = e.clientX + 'px';
+      ghost.style.top = e.clientY + 'px';
+      ghost.style.display = 'block';
+
+      renderBoard();
+      e.stopPropagation();
+    }
+
+    function onWindowPointerMove(e) {
+      if (!isDragging) return;
+
+      const ghost = document.getElementById('dragGhost');
+      ghost.style.left = e.clientX + 'px';
+      ghost.style.top = e.clientY + 'px';
+    }
+
+    function onWindowPointerUp(e) {
+      if (!isDragging) return;
+
+      const ghost = document.getElementById('dragGhost');
+      ghost.style.display = 'none';
+
+      // Find element under pointer
+      const targetEl = document.elementFromPoint(e.clientX, e.clientY);
+      const sqEl = targetEl ? targetEl.closest('.chess-square') : null;
+
+      if (sqEl && sqEl.dataset.row !== undefined && sqEl.dataset.col !== undefined) {
+        const targetRow = parseInt(sqEl.dataset.row, 10);
+        const targetCol = parseInt(sqEl.dataset.col, 10);
+        const targetSqName = getSquareFromCoords(targetRow, targetCol);
+
+        const moveAttempt = legalMovesForSelected.find(m => m.to === targetSqName);
+        if (moveAttempt) {
+          if (moveAttempt.flags.includes('p')) {
+            pendingPromotionMove = { from: draggedSquare, to: targetSqName };
+            showPromotionModal();
+          } else {
+            executeMove({ from: draggedSquare, to: targetSqName });
+          }
+        } else {
+          // Illegal drop - reset selection
+          selectedSquare = null;
+          legalMovesForSelected = [];
+          renderBoard();
+        }
+      } else {
+        selectedSquare = null;
+        legalMovesForSelected = [];
+        renderBoard();
+      }
+
+      isDragging = false;
+      draggedSquare = null;
+      draggedPiece = null;
+    }
+
+    function handleSquareClick(r, c) {
+      if (isDragging) return; // Ignore click if drag just finished
+      const sqName = getSquareFromCoords(r, c);
+
+      if (gameMode === 'online') {
+        if (!currentRoomCode) {
+          showToast('Join or create a room first.');
+          return;
+        }
+        if (game.turn() !== myPlayerColor) {
+          showToast('Waiting for opponent\'s move...');
+          return;
+        }
+      }
+
+      if (selectedSquare) {
+        if (selectedSquare === sqName) {
+          selectedSquare = null;
+          legalMovesForSelected = [];
+          renderBoard();
+          return;
+        }
+
+        const moveAttempt = legalMovesForSelected.find(m => m.to === sqName);
+        if (moveAttempt) {
+          if (moveAttempt.flags.includes('p')) {
+            pendingPromotionMove = { from: selectedSquare, to: sqName };
+            showPromotionModal();
+            return;
+          }
+
+          executeMove({ from: selectedSquare, to: sqName });
+          return;
+        }
+      }
+
+      const piece = game.get(sqName);
+      if (piece && piece.color === game.turn()) {
+        selectedSquare = sqName;
+        legalMovesForSelected = game.moves({ square: sqName, verbose: true });
+      } else {
+        selectedSquare = null;
+        legalMovesForSelected = [];
+      }
+
+      renderBoard();
+    }
+
+    function executeMove(moveObj) {
+      const result = game.move(moveObj);
+      if (result) {
+        lastMove = { from: result.from, to: result.to };
+        selectedSquare = null;
+        legalMovesForSelected = [];
+
+        renderBoard();
+        updateGameInfo();
+
+        if (gameMode === 'online') {
+          broadcastGameState();
+        }
+      }
+    }
+
+    function showPromotionModal() {
+      const modal = document.getElementById('promotionModal');
+      const container = document.getElementById('promotionOptions');
+      container.innerHTML = '';
+
+      const color = game.turn();
+      const choices = ['q', 'r', 'b', 'n'];
+
+      choices.forEach(type => {
+        const btn = document.createElement('button');
+        btn.className = 'w-12 h-12 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg p-1 flex items-center justify-center transition-all hover:scale-105';
+        const span = document.createElement('span');
+        span.className = `piece-symbol text-3xl font-normal leading-none ${color === 'w' ? 'piece-white' : 'piece-black'}`;
+        span.innerText = UNICODE_PIECES[type];
+        btn.appendChild(span);
+        btn.onclick = () => {
+          modal.classList.add('hidden');
+          if (pendingPromotionMove) {
+            executeMove({
+              from: pendingPromotionMove.from,
+              to: pendingPromotionMove.to,
+              promotion: type
+            });
+            pendingPromotionMove = null;
+          }
+        };
+        container.appendChild(btn);
+      });
+
+      modal.classList.remove('hidden');
+    }
+
+    function updateGameInfo() {
+      const turnBadge = document.getElementById('turnIndicator');
+      const currentTurn = game.turn() === 'w' ? 'WHITE' : 'BLACK';
+      turnBadge.innerText = `${currentTurn} TO MOVE`;
+      turnBadge.className = game.turn() === 'w' 
+        ? 'text-xs font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-950 font-mono'
+        : 'text-xs font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700 font-mono';
+
+      document.getElementById('fenText').innerText = game.fen();
+
+      const noticeBanner = document.getElementById('gameNoticeBanner');
+      const noticeText = document.getElementById('gameNoticeText');
+
+      if (game.in_checkmate()) {
+        const winner = game.turn() === 'w' ? 'Black' : 'White';
+        showOverlay('Checkmate!', `${winner} wins by checkmate protocol.`);
+        noticeBanner.classList.remove('hidden');
+        noticeText.innerText = `CHECKMATE - ${winner.toUpperCase()} WINS`;
+      } else if (game.in_draw() || game.in_stalemate() || game.in_threefold_repetition()) {
+        let reason = 'Draw protocol reached';
+        if (game.in_stalemate()) reason = 'Stalemate reached';
+        if (game.in_threefold_repetition()) reason = 'Draw by threefold repetition';
+        showOverlay('Draw Game', reason);
+        noticeBanner.classList.remove('hidden');
+        noticeText.innerText = `DRAW GAME (${reason.toUpperCase()})`;
+      } else if (game.in_check()) {
+        noticeBanner.classList.remove('hidden');
+        noticeText.innerText = `CHECK DECLARED ON ${currentTurn}`;
+      } else {
+        noticeBanner.classList.add('hidden');
+      }
+
+      updateMoveLog();
+    }
+
+    function updateMoveLog() {
+      const container = document.getElementById('moveLogContainer');
+      const history = game.history({ verbose: true });
+      document.getElementById('moveCountTag').innerText = `${history.length} MOVES`;
+
+      if (history.length === 0) {
+        container.innerHTML = `<div class="text-slate-600 text-[11px] italic text-center py-4">No moves recorded yet.</div>`;
+        return;
+      }
+
+      let html = '';
+      for (let i = 0; i < history.length; i += 2) {
+        const moveNum = Math.floor(i / 2) + 1;
+        const whiteMove = history[i] ? history[i].san : '';
+        const blackMove = history[i + 1] ? history[i + 1].san : '';
+
+        html += `
+          <div class="flex items-center justify-between py-0.5 border-b border-slate-800/40 text-[11px]">
+            <span class="text-slate-500 w-8">${moveNum}.</span>
+            <span class="text-cyan-300 font-bold flex-1">${whiteMove}</span>
+            <span class="text-slate-300 flex-1">${blackMove}</span>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function updateCapturedAndAdvantage() {
+      const history = game.history({ verbose: true });
+      const capturedWhite = [];
+      const capturedBlack = [];
+
+      history.forEach(m => {
+        if (m.captured) {
+          if (m.color === 'w') {
+            capturedBlack.push(m.captured);
+          } else {
+            capturedWhite.push(m.captured);
+          }
+        }
+      });
+
+      const renderIcons = (containerId, pieceList, colorChar) => {
+        const el = document.getElementById(containerId);
+        el.innerHTML = '';
+        pieceList.forEach(type => {
+          const span = document.createElement('span');
+          span.className = `piece-symbol text-base leading-none mx-0.5 ${colorChar === 'w' ? 'piece-white' : 'piece-black'}`;
+          span.innerText = UNICODE_PIECES[type];
+          el.appendChild(span);
+        });
+      };
+
+      if (!boardFlipped) {
+        renderIcons('topCapturedPieces', capturedWhite, 'w');
+        renderIcons('bottomCapturedPieces', capturedBlack, 'b');
+        document.getElementById('topPlayerTag').innerText = 'BLACK';
+        document.getElementById('bottomPlayerTag').innerText = 'WHITE';
+      } else {
+        renderIcons('topCapturedPieces', capturedBlack, 'b');
+        renderIcons('bottomCapturedPieces', capturedWhite, 'w');
+        document.getElementById('topPlayerTag').innerText = 'WHITE';
+        document.getElementById('bottomPlayerTag').innerText = 'BLACK';
+      }
+
+      let whiteScore = capturedBlack.reduce((acc, p) => acc + PIECE_VALUES[p], 0);
+      let blackScore = capturedWhite.reduce((acc, p) => acc + PIECE_VALUES[p], 0);
+      let diff = whiteScore - blackScore;
+
+      const topAdv = document.getElementById('topAdvantage');
+      const bottomAdv = document.getElementById('bottomAdvantage');
+
+      topAdv.innerText = '';
+      bottomAdv.innerText = '';
+
+      if (!boardFlipped) {
+        if (diff > 0) bottomAdv.innerText = `+${diff}`;
+        if (diff < 0) topAdv.innerText = `+${Math.abs(diff)}`;
+      } else {
+        if (diff > 0) topAdv.innerText = `+${diff}`;
+        if (diff < 0) bottomAdv.innerText = `+${Math.abs(diff)}`;
+      }
+    }
+
+    function flipBoardToggle() {
+      boardFlipped = !boardFlipped;
+      renderBoard();
+    }
+
+    function showOverlay(title, msg) {
+      document.getElementById('overlayTitle').innerText = title;
+      document.getElementById('overlayMessage').innerText = msg;
+      document.getElementById('boardOverlay').classList.remove('hidden');
+    }
+
+    function hideOverlay() {
+      document.getElementById('boardOverlay').classList.add('hidden');
+    }
+
+    function resignGame() {
+      if (game.game_over()) return;
+      const resigningColor = gameMode === 'online' ? (myPlayerColor === 'w' ? 'White' : 'Black') : (game.turn() === 'w' ? 'White' : 'Black');
+      const winner = resigningColor === 'White' ? 'Black' : 'White';
+      
+      showOverlay('Resignation', `${resigningColor} has resigned. ${winner} wins!`);
+
+      if (gameMode === 'online') {
+        broadcastCustomAction({ type: 'RESIGN', player: myPlayerColor });
+      }
+    }
+
+    function offerDraw() {
+      if (game.game_over()) return;
+      if (gameMode === 'online') {
+        broadcastCustomAction({ type: 'DRAW_OFFER', player: myPlayerColor });
+        showToast('Draw offer sent to opponent');
+      } else {
+        showOverlay('Draw Agreed', 'Players have agreed to a draw.');
+      }
+    }
+
+    function requestRematchOrReset() {
+      hideOverlay();
+      if (gameMode === 'online') {
+        broadcastCustomAction({ type: 'REMATCH_REQUEST', player: myPlayerColor });
+        showToast('Rematch request broadcast');
+      } else {
+        game.reset();
+        lastMove = null;
+        selectedSquare = null;
+        legalMovesForSelected = [];
+        renderBoard();
+        updateGameInfo();
+        showToast('Board reset to starting state');
+      }
+    }
+
+    function setupMQTTConnection() {
+      updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
+
+      const options = {
+        clientId: clientID,
+        clean: true,
+        connectTimeout: 5000,
+        keepalive: 30
+      };
+
+      try {
+        mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', options);
+
+        mqttClient.on('connect', () => {
+          onMQTTConnectSuccess();
+        });
+
+        mqttClient.on('error', (err) => {
+          console.error('MQTT Connect Error:', err);
+          onMQTTConnectFailure(err);
+        });
+
+        mqttClient.on('close', () => {
+          if (isConnectedToBroker) {
+            onMQTTConnectionLost();
+          }
+        });
+
+        mqttClient.on('message', (topic, payload) => {
+          onMQTTMessageArrived(payload.toString());
+        });
+
+      } catch (err) {
+        console.error('MQTT Setup Error:', err);
+        updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
+      }
+    }
+
+    function onMQTTConnectSuccess() {
+      isConnectedToBroker = true;
+      if (gameMode === 'online') {
+        updateConnectionStatus(currentRoomCode ? 'ONLINE: WAITING' : 'ONLINE: READY', 'bg-amber-400');
+      } else {
+        updateConnectionStatus('LOCAL MODE', 'bg-emerald-400');
+      }
+    }
+
+    function onMQTTConnectFailure(err) {
+      isConnectedToBroker = false;
+      updateConnectionStatus('OFFLINE', 'bg-slate-500');
+      console.warn('MQTT Connection Failure:', err);
+    }
+
+    function onMQTTConnectionLost() {
+      isConnectedToBroker = false;
+      updateConnectionStatus('DISCONNECTED', 'bg-rose-500');
+      showToast('Network disconnected. Reconnecting...');
+    }
+
+    function updateConnectionStatus(text, dotClass) {
+      document.getElementById('connectionBadgeText').innerText = text;
+      const badgeDot = document.querySelector('#connectionBadge span:first-child');
+      if (badgeDot) {
+        badgeDot.className = `w-2 h-2 rounded-full animate-pulse ${dotClass}`;
+      }
+    }
+
+    function setGameMode(mode) {
+      gameMode = mode;
+      const localBtn = document.getElementById('modeLocalBtn');
+      const onlineBtn = document.getElementById('modeOnlineBtn');
+      const onlineCard = document.getElementById('onlineRoomCard');
+
+      if (mode === 'local') {
+        localBtn.className = 'px-2.5 py-1 rounded-md bg-slate-800 text-cyan-400 font-medium transition-all shadow-sm';
+        onlineBtn.className = 'px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all';
+        onlineCard.classList.add('hidden');
+        boardFlipped = false;
+        updateConnectionStatus('LOCAL MODE', 'bg-emerald-400');
+      } else {
+        onlineBtn.className = 'px-2.5 py-1 rounded-md bg-slate-800 text-cyan-400 font-medium transition-all shadow-sm';
+        localBtn.className = 'px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all';
+        onlineCard.classList.remove('hidden');
+        updateConnectionStatus(isConnectedToBroker ? 'ONLINE: READY' : 'CONNECTING...', 'bg-amber-400');
+      }
+      renderBoard();
+    }
+
+    function createOnlineRoom() {
+      if (!isConnectedToBroker) {
+        showToast('Connecting to network broker...');
+        return;
+      }
+
+      const code = 'GRID' + Math.floor(100 + Math.random() * 900);
+      currentRoomCode = code;
+      myPlayerColor = 'w';
+      boardFlipped = false;
+
+      subscribeToRoomTopic(code);
+
+      document.getElementById('roomSetupControls').classList.add('hidden');
+      document.getElementById('roomActiveDisplay').classList.remove('hidden');
+      document.getElementById('currentRoomCode').innerText = code;
+      document.getElementById('onlineRoleTag').innerText = 'HOST (WHITE)';
+      
+      updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
+      showToast(`Room ${code} created. Share code with friend!`);
+
+      game.reset();
+      lastMove = null;
+      renderBoard();
+      updateGameInfo();
+    }
+
+    function joinOnlineRoom() {
+      if (!isConnectedToBroker) {
+        showToast('Connecting to network broker...');
+        return;
+      }
+
+      const input = document.getElementById('roomCodeInput');
+      const code = input.value.trim().toUpperCase();
+
+      if (code.length < 4) {
+        showToast('Enter valid room code');
+        return;
+      }
+
+      currentRoomCode = code;
+      myPlayerColor = 'b';
+      boardFlipped = true;
+
+      subscribeToRoomTopic(code);
+
+      document.getElementById('roomSetupControls').classList.add('hidden');
+      document.getElementById('roomActiveDisplay').classList.remove('hidden');
+      document.getElementById('currentRoomCode').innerText = code;
+      document.getElementById('onlineRoleTag').innerText = 'JOINER (BLACK)';
+
+      updateConnectionStatus('ONLINE: CONNECTED', 'bg-emerald-400');
+      showToast(`Joined room ${code}!`);
+
+      broadcastCustomAction({ type: 'JOIN_REQUEST' });
+
+      renderBoard();
+      updateGameInfo();
+    }
+
+    function subscribeToRoomTopic(code) {
+      const topic = `gridstatesim/room/${code}`;
+      if (mqttClient) {
+        mqttClient.subscribe(topic);
+      }
+    }
+
+    function broadcastGameState() {
+      if (!mqttClient || !currentRoomCode) return;
+
+      const payload = {
+        sender: clientID,
+        type: 'GAME_STATE',
+        fen: game.fen(),
+        lastMove: lastMove,
+        turn: game.turn()
+      };
+
+      mqttClient.publish(`gridstatesim/room/${currentRoomCode}`, JSON.stringify(payload));
+    }
+
+    function broadcastCustomAction(actionObj) {
+      if (!mqttClient || !currentRoomCode) return;
+
+      const payload = {
+        sender: clientID,
+        ...actionObj
+      };
+
+      mqttClient.publish(`gridstatesim/room/${currentRoomCode}`, JSON.stringify(payload));
+    }
+
+    function onMQTTMessageArrived(payloadStr) {
+      try {
+        const data = JSON.parse(payloadStr);
+
+        if (data.sender === clientID) return;
+
+        if (data.type === 'GAME_STATE') {
+          game.load(data.fen);
+          lastMove = data.lastMove;
+          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+          renderBoard();
+          updateGameInfo();
+        }
+
+        if (data.type === 'JOIN_REQUEST' && myPlayerColor === 'w') {
+          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+          showToast('Opponent joined the room!');
+          broadcastGameState();
+        }
+
+        if (data.type === 'RESIGN') {
+          const winner = data.player === 'w' ? 'Black' : 'White';
+          showOverlay('Opponent Resigned', `Opponent has resigned. ${winner} wins!`);
+        }
+
+        if (data.type === 'DRAW_OFFER') {
+          showOverlay('Draw Offer', 'Opponent offered a draw.');
+          broadcastCustomAction({ type: 'DRAW_ACCEPT' });
+        }
+
+        if (data.type === 'DRAW_ACCEPT') {
+          showOverlay('Draw Agreed', 'Opponent accepted draw offer.');
+        }
+
+        if (data.type === 'REMATCH_REQUEST') {
+          showToast('Opponent reset the board for rematch');
+          game.reset();
+          lastMove = null;
+          selectedSquare = null;
+          legalMovesForSelected = [];
+          hideOverlay();
+          renderBoard();
+          updateGameInfo();
+        }
+
+      } catch (err) {
+        console.error('Error handling MQTT message:', err);
+      }
+    }
+
+    function copyRoomCode() {
+      if (!currentRoomCode) return;
+      
+      const textToCopy = currentRoomCode;
+      const dummy = document.createElement('textarea');
+      document.body.appendChild(dummy);
+      dummy.value = textToCopy;
+      dummy.select();
+      document.execCommand('copy');
+      document.body.removeChild(dummy);
+
+      const btnText = document.getElementById('copyBtnText');
+      btnText.innerText = 'COPIED!';
+      setTimeout(() => { btnText.innerText = 'COPY'; }, 2000);
+      showToast(`Room code ${currentRoomCode} copied!`);
+    }
+
+    function copyFEN() {
+      const fen = game.fen();
+      const dummy = document.createElement('textarea');
+      document.body.appendChild(dummy);
+      dummy.value = fen;
+      dummy.select();
+      document.execCommand('copy');
+      document.body.removeChild(dummy);
+      showToast('FEN copied to clipboard!');
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toastNotification');
+      const text = document.getElementById('toastText');
+      text.innerText = msg;
+
+      toast.classList.remove('translate-y-20', 'opacity-0');
+      toast.classList.add('translate-y-0', 'opacity-100');
+
+      setTimeout(() => {
+        toast.classList.remove('translate-y-0', 'opacity-100');
+        toast.classList.add('translate-y-20', 'opacity-0');
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
