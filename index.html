@@ -324,6 +324,9 @@
 
     const PIECE_VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 
+    // FIREBASE CONFIG & REST ENDPOINT
+    const DB_URL = "https://grid-state-simulator-default-rtdb.firebaseio.com";
+
     // APP STATE
     let game = new Chess();
     let gameMode = 'local';
@@ -338,10 +341,10 @@
     let draggedSquare = null;
     let draggedPiece = null;
 
-    // ntfy.sh SSE Multiplayer State
+    // Firebase Multiplayer State
     let currentRoomCode = null;
     let myPlayerColor = 'w';
-    let ntfyEventSource = null;
+    let firebasePollInterval = null;
 
     window.addEventListener('load', () => {
       lucide.createIcons();
@@ -843,7 +846,7 @@
         onlineBtn.className = 'px-2.5 py-1 rounded-md text-slate-400 hover:text-slate-200 transition-all';
         onlineCard.classList.add('hidden');
         boardFlipped = false;
-        closeNtfyConnection();
+        stopFirebasePolling();
         updateConnectionStatus('LOCAL MODE', 'bg-emerald-400');
       } else {
         onlineBtn.className = 'px-2.5 py-1 rounded-md bg-slate-800 text-cyan-400 font-medium transition-all shadow-sm';
@@ -862,7 +865,7 @@
       }
     }
 
-    // NTFY.SH SSE MULTIPLAYER PROTOCOL
+    // FIREBASE REST MULTIPLAYER PROTOCOL
     async function createOnlineRoom() {
       const code = Math.random().toString(36).substring(2, 7).toUpperCase();
       currentRoomCode = code;
@@ -877,7 +880,22 @@
       updateConnectionStatus('ONLINE: WAITING FOR OPPONENT', 'bg-amber-400');
       showToast(`Room ${code} created!`);
 
-      startSSEConnection(code);
+      try {
+        await fetch(`${DB_URL}/rooms/${code}.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fen: game.fen(),
+            history: [],
+            status: "waiting",
+            updatedAt: Date.now()
+          })
+        });
+      } catch (err) {
+        console.error('Firebase create room error:', err);
+      }
+
+      startFirebasePolling(code);
     }
 
     async function joinOnlineRoom() {
@@ -889,110 +907,107 @@
         return;
       }
 
-      currentRoomCode = code;
-      myPlayerColor = 'b';
-      boardFlipped = true;
+      try {
+        const res = await fetch(`${DB_URL}/rooms/${code}.json`);
+        if (!res.ok) {
+          showToast('Room not found or invalid');
+          return;
+        }
+        const data = await res.json();
+        if (!data) {
+          showToast('Room does not exist');
+          return;
+        }
 
-      document.getElementById('roomSetupControls').classList.add('hidden');
-      document.getElementById('roomActiveDisplay').classList.remove('hidden');
-      document.getElementById('currentRoomCode').innerText = currentRoomCode;
-      document.getElementById('onlineRoleTag').innerText = 'JOINER (BLACK)';
+        currentRoomCode = code;
+        myPlayerColor = 'b';
+        boardFlipped = true;
 
-      updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-      showToast(`Joined room ${code}!`);
+        if (data.fen) {
+          game.load(data.fen);
+          renderBoard();
+          updateGameInfo();
+        }
 
-      startSSEConnection(code);
-      await sendNtfyMessage({ type: 'join', sender: 'b' });
+        document.getElementById('roomSetupControls').classList.add('hidden');
+        document.getElementById('roomActiveDisplay').classList.remove('hidden');
+        document.getElementById('currentRoomCode').innerText = currentRoomCode;
+        document.getElementById('onlineRoleTag').innerText = 'JOINER (BLACK)';
+
+        updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+        showToast(`Joined room ${code}!`);
+
+        await fetch(`${DB_URL}/rooms/${code}.json`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            status: "playing",
+            updatedAt: Date.now()
+          })
+        });
+
+        startFirebasePolling(code);
+      } catch (err) {
+        console.error('Firebase join error:', err);
+        showToast('Failed to connect to room');
+      }
     }
 
-    async function sendNtfyMessage(payload) {
+    async function sendFirebaseState() {
       if (!currentRoomCode) return;
-      const packet = {
-        sender: myPlayerColor,
-        ...payload
-      };
-
       try {
-        await fetch(`https://ntfy.sh/${currentRoomCode}`, {
-          method: 'POST',
-          body: JSON.stringify(packet)
+        await fetch(`${DB_URL}/rooms/${currentRoomCode}.json`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fen: game.fen(),
+            history: game.history(),
+            status: "playing",
+            updatedAt: Date.now()
+          })
         });
       } catch (err) {
-        console.error('ntfy send error:', err);
+        console.error('Firebase send state error:', err);
       }
     }
 
-    function closeNtfyConnection() {
-      if (ntfyEventSource) {
-        ntfyEventSource.close();
-        ntfyEventSource = null;
+    function stopFirebasePolling() {
+      if (firebasePollInterval) {
+        clearInterval(firebasePollInterval);
+        firebasePollInterval = null;
       }
     }
 
-    function startSSEConnection(code) {
-      closeNtfyConnection();
+    function startFirebasePolling(code) {
+      stopFirebasePolling();
 
-      ntfyEventSource = new EventSource(`https://ntfy.sh/${code}/sse?since=all`);
-
-      ntfyEventSource.onmessage = (event) => {
+      firebasePollInterval = setInterval(async () => {
+        if (!currentRoomCode) return;
         try {
-          const packet = JSON.parse(event.data);
-          if (packet.event !== 'message' || !packet.message) return;
+          const res = await fetch(`${DB_URL}/rooms/${code}.json`, { cache: 'no-store' });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data) return;
 
-          const payload = JSON.parse(packet.message);
-          if (payload.sender === myPlayerColor) return;
-
-          handleRemoteMessage(payload);
-        } catch (e) {
-          console.error('SSE parse error:', e);
-        }
-      };
-
-      ntfyEventSource.onerror = (err) => {
-        console.debug('SSE connection restart/reconnect check');
-      };
-    }
-
-    function handleRemoteMessage(payload) {
-      if (!payload) return;
-
-      if (payload.type === 'join' && myPlayerColor === 'w') {
-        showToast('Opponent joined room!');
-        updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-        // Immediately sync current state to joiner
-        sendNtfyMessage({
-          type: 'sync',
-          fen: game.fen(),
-          history: game.history(),
-          sender: myPlayerColor
-        });
-      } else if ((payload.type === 'move' || payload.type === 'sync') && payload.fen) {
-        if (payload.fen !== game.fen()) {
-          game.load(payload.fen);
-          updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
-          if (myPlayerColor === 'b') {
-            boardFlipped = true;
+          if (data.status === "playing") {
+            if (myPlayerColor === 'w') {
+              updateConnectionStatus('ONLINE: PLAYING', 'bg-emerald-400');
+            }
           }
-          renderBoard();
-          updateGameInfo();
-          showToast('Opponent move received');
+
+          if (data.fen && data.fen !== game.fen()) {
+            // Only apply if the remote fen differs and it's opponent's turn or sync update
+            game.load(data.fen);
+            if (myPlayerColor === 'b') {
+              boardFlipped = true;
+            }
+            renderBoard();
+            updateGameInfo();
+          }
+        } catch (err) {
+          console.debug('Firebase poll check error:', err);
         }
-      } else if (payload.type === 'resign' && payload.winner) {
-        showOverlay('Game Over', `${payload.winner} wins by resignation!`);
-      } else if (payload.type === 'draw_offer') {
-        showOverlay('Draw Offer', 'Opponent has offered a draw.');
-      } else if (payload.type === 'rematch' && payload.fen) {
-        if (payload.fen !== game.fen()) {
-          game.load(payload.fen);
-          lastMove = null;
-          selectedSquare = null;
-          legalMovesForSelected = [];
-          hideOverlay();
-          renderBoard();
-          updateGameInfo();
-          showToast('Rematch started by opponent');
-        }
-      }
+      }, 1000);
     }
 
     function copyRoomLink() {
